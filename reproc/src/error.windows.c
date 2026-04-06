@@ -9,7 +9,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <windows.h>
-#include <winsock2.h>
+
 
 #include <reproc/reproc.h>
 
@@ -19,7 +19,7 @@ const int REPROC_EINVAL = -ERROR_INVALID_PARAMETER;
 const int REPROC_EPIPE = -ERROR_BROKEN_PIPE;
 const int REPROC_ETIMEDOUT = -WAIT_TIMEOUT;
 const int REPROC_ENOMEM = -ERROR_NOT_ENOUGH_MEMORY;
-const int REPROC_EWOULDBLOCK = -WSAEWOULDBLOCK;
+const int REPROC_EWOULDBLOCK = -ERROR_NO_DATA;
 
 enum { ERROR_STRING_MAX_SIZE = 512 };
 

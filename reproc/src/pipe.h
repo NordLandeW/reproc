@@ -4,10 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef _WIN64
-typedef uint64_t pipe_type; // `SOCKET`
-#elif _WIN32
-typedef uint32_t pipe_type; // `SOCKET`
+#ifdef _WIN32
+typedef void *pipe_type; // `HANDLE`
 #else
 typedef int pipe_type; // fd
 #endif

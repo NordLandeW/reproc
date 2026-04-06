@@ -9,156 +9,32 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <windows.h>
-#include <winsock2.h>
 
 #include "error.h"
 #include "handle.h"
 #include "macro.h"
 
-const SOCKET PIPE_INVALID = INVALID_SOCKET;
+const HANDLE PIPE_INVALID = INVALID_HANDLE_VALUE; // NOLINT
 
-const short PIPE_EVENT_IN = POLLIN;
-const short PIPE_EVENT_OUT = POLLOUT;
+const short PIPE_EVENT_IN = 1;
+const short PIPE_EVENT_OUT = 2;
 
-// Inspired by https://gist.github.com/geertj/4325783.
-static int socketpair(int domain, int type, int protocol, SOCKET *out)
-{
-  ASSERT(out);
-
-  SOCKET server = PIPE_INVALID;
-  SOCKET pair[] = { PIPE_INVALID, PIPE_INVALID };
-  int r = -1;
-
-  server = WSASocketW(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
-  if (server == INVALID_SOCKET) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  SOCKADDR_IN localhost = { 0 };
-  localhost.sin_family = AF_INET;
-  localhost.sin_addr.S_un.S_addr = htonl(INADDR_LOOPBACK);
-  localhost.sin_port = 0;
-
-  r = bind(server, (SOCKADDR *) &localhost, sizeof(localhost));
-  if (r < 0) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  r = listen(server, 1);
-  if (r < 0) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  SOCKADDR_STORAGE name = { 0 };
-  int size = sizeof(name);
-  r = getsockname(server, (SOCKADDR *) &name, &size);
-  if (r < 0) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  pair[0] = WSASocketW(domain, type, protocol, NULL, 0, 0);
-  if (pair[0] == INVALID_SOCKET) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  struct {
-    WSAPROTOCOL_INFOW data;
-    int size;
-  } info = { { 0 }, sizeof(WSAPROTOCOL_INFOW) };
-
-  r = getsockopt(pair[0], SOL_SOCKET, SO_PROTOCOL_INFOW, (char *) &info.data,
-                 &info.size);
-  if (r < 0) {
-    goto finish;
-  }
-
-  // We require the returned sockets to be usable as Windows file handles. This
-  // might not be the case if extra LSP providers are installed.
-
-  if (!(info.data.dwServiceFlags1 & XP1_IFS_HANDLES)) {
-    r = -ERROR_NOT_SUPPORTED;
-    goto finish;
-  }
-
-  r = pipe_nonblocking(pair[0], true);
-  if (r < 0) {
-    goto finish;
-  }
-
-  r = connect(pair[0], (SOCKADDR *) &name, size);
-  if (r < 0 && WSAGetLastError() != WSAEWOULDBLOCK) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  r = pipe_nonblocking(pair[0], false);
-  if (r < 0) {
-    goto finish;
-  }
-
-  pair[1] = accept(server, NULL, NULL);
-  if (pair[1] == INVALID_SOCKET) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  out[0] = pair[0];
-  out[1] = pair[1];
-
-  pair[0] = PIPE_INVALID;
-  pair[1] = PIPE_INVALID;
-
-finish:
-  pipe_destroy(server);
-  pipe_destroy(pair[0]);
-  pipe_destroy(pair[1]);
-
-  return r;
-}
-
-int pipe_init(SOCKET *read, SOCKET *write)
+int pipe_init(HANDLE *read, HANDLE *write)
 {
   ASSERT(read);
   ASSERT(write);
 
-  SOCKET pair[] = { PIPE_INVALID, PIPE_INVALID };
+  HANDLE pair[] = { PIPE_INVALID, PIPE_INVALID };
   int r = -1;
 
-  // Use sockets instead of pipes so we can use `WSAPoll` which only works with
-  // sockets.
-  r = socketpair(AF_INET, SOCK_STREAM, 0, pair);
-  if (r < 0) {
-    goto finish;
-  }
+  SECURITY_ATTRIBUTES sa = {
+    .nLength = sizeof(SECURITY_ATTRIBUTES),
+    .bInheritHandle = FALSE,
+    .lpSecurityDescriptor = NULL
+  };
 
-  r = SetHandleInformation((HANDLE) pair[0], HANDLE_FLAG_INHERIT, 0);
-  if (r == 0) {
+  if (!CreatePipe(&pair[0], &pair[1], &sa, 0)) {
     r = -(int) GetLastError();
-    goto finish;
-  }
-
-  r = SetHandleInformation((HANDLE) pair[1], HANDLE_FLAG_INHERIT, 0);
-  if (r == 0) {
-    r = -(int) GetLastError();
-    goto finish;
-  }
-
-  // Make the connection unidirectional to better emulate a pipe.
-
-  r = shutdown(pair[0], SD_SEND);
-  if (r < 0) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  r = shutdown(pair[1], SD_RECEIVE);
-  if (r < 0) {
-    r = -WSAGetLastError();
     goto finish;
   }
 
@@ -167,99 +43,137 @@ int pipe_init(SOCKET *read, SOCKET *write)
 
   pair[0] = PIPE_INVALID;
   pair[1] = PIPE_INVALID;
+  r = 0;
 
 finish:
-  pipe_destroy(pair[0]);
-  pipe_destroy(pair[1]);
+  handle_destroy(pair[0]);
+  handle_destroy(pair[1]);
 
   return r;
 }
 
-int pipe_nonblocking(SOCKET pipe, bool enable)
+int pipe_nonblocking(HANDLE pipe, bool enable)
 {
-  u_long mode = enable;
-  int r = ioctlsocket(pipe, (long) FIONBIO, &mode);
-  return r < 0 ? -WSAGetLastError() : 0;
+  DWORD mode = enable ? PIPE_NOWAIT : PIPE_WAIT;
+  BOOL r = SetNamedPipeHandleState(pipe, &mode, NULL, NULL);
+  return r ? 0 : -(int) GetLastError();
 }
 
-int pipe_read(SOCKET pipe, uint8_t *buffer, size_t size)
+int pipe_read(HANDLE pipe, uint8_t *buffer, size_t size)
 {
   ASSERT(pipe != PIPE_INVALID);
   ASSERT(buffer);
   ASSERT(size <= INT_MAX);
 
-  int r = recv(pipe, (char *) buffer, (int) size, 0);
+  DWORD bytes_read = 0;
+  BOOL r = ReadFile(pipe, buffer, (DWORD) size, &bytes_read, NULL);
 
-  if (r == 0) {
+  if (!r) {
+    DWORD err = GetLastError();
+
+    if (err == ERROR_BROKEN_PIPE) {
+      return -ERROR_BROKEN_PIPE;
+    }
+
+    if (err == ERROR_NO_DATA) {
+      return -ERROR_NO_DATA;
+    }
+
+    return -(int) err;
+  }
+
+  if (bytes_read == 0) {
     return -ERROR_BROKEN_PIPE;
   }
 
-  return r < 0 ? -WSAGetLastError() : r;
+  return (int) bytes_read;
 }
 
-int pipe_write(SOCKET pipe, const uint8_t *buffer, size_t size)
+int pipe_write(HANDLE pipe, const uint8_t *buffer, size_t size)
 {
   ASSERT(pipe != PIPE_INVALID);
   ASSERT(buffer);
   ASSERT(size <= INT_MAX);
 
-  int r = send(pipe, (const char *) buffer, (int) size, 0);
+  DWORD bytes_written = 0;
+  BOOL r = WriteFile(pipe, buffer, (DWORD) size, &bytes_written, NULL);
 
-  return r < 0 ? -WSAGetLastError() : r;
+  if (!r) {
+    DWORD err = GetLastError();
+
+    if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA) {
+      return -ERROR_BROKEN_PIPE;
+    }
+
+    return -(int) err;
+  }
+
+  return (int) bytes_written;
 }
 
 int pipe_poll(pipe_event_source *sources, size_t num_sources, int timeout)
 {
   ASSERT(num_sources <= INT_MAX);
 
-  WSAPOLLFD *pollfds = NULL;
-  int r = -1;
+  DWORD start = GetTickCount();
 
-  pollfds = calloc(num_sources, sizeof(WSAPOLLFD));
-  if (pollfds == NULL) {
-    r = -ERROR_NOT_ENOUGH_MEMORY;
-    goto finish;
+  for (;;) {
+    int ready = 0;
+
+    for (size_t i = 0; i < num_sources; i++) {
+      sources[i].events = 0;
+
+      if (sources[i].pipe == PIPE_INVALID) {
+        continue;
+      }
+
+      if (sources[i].interests & PIPE_EVENT_IN) {
+        DWORD avail = 0;
+        BOOL r = PeekNamedPipe(sources[i].pipe, NULL, 0, NULL, &avail, NULL);
+
+        if (r && avail > 0) {
+          sources[i].events |= PIPE_EVENT_IN;
+        } else if (!r) {
+          // Pipe broken (write end closed). Signal as readable so the
+          // caller's subsequent read returns EPIPE.
+          sources[i].events |= PIPE_EVENT_IN;
+        }
+      }
+
+      if (sources[i].interests & PIPE_EVENT_OUT) {
+        // Write end of a pipe is generally always writable.
+        sources[i].events |= PIPE_EVENT_OUT;
+      }
+
+      if (sources[i].events) {
+        ready++;
+      }
+    }
+
+    if (ready > 0) {
+      return ready;
+    }
+
+    if (timeout == 0) {
+      return 0;
+    }
+
+    DWORD elapsed = GetTickCount() - start;
+    if (timeout > 0 && (int) elapsed >= timeout) {
+      return 0;
+    }
+
+    Sleep(1);
   }
-
-  for (size_t i = 0; i < num_sources; i++) {
-    pollfds[i].fd = sources[i].pipe;
-    pollfds[i].events = sources[i].interests;
-  }
-
-  r = WSAPoll(pollfds, (ULONG) num_sources, timeout);
-  if (r < 0) {
-    r = -WSAGetLastError();
-    goto finish;
-  }
-
-  for (size_t i = 0; i < num_sources; i++) {
-    sources[i].events = pollfds[i].revents;
-  }
-
-finish:
-  free(pollfds);
-
-  return r;
 }
 
-int pipe_shutdown(SOCKET pipe)
+int pipe_shutdown(HANDLE pipe)
 {
-  if (pipe == PIPE_INVALID) {
-    return 0;
-  }
-
-  int r = shutdown(pipe, SD_SEND);
-  return r < 0 ? -WSAGetLastError() : 0;
+  (void) pipe;
+  return 0;
 }
 
-SOCKET pipe_destroy(SOCKET pipe)
+HANDLE pipe_destroy(HANDLE pipe)
 {
-  if (pipe == PIPE_INVALID) {
-    return PIPE_INVALID;
-  }
-
-  int r = closesocket(pipe);
-  ASSERT_UNUSED(r == 0);
-
-  return PIPE_INVALID;
+  return handle_destroy(pipe);
 }

@@ -1,5 +1,5 @@
 if(WIN32)
-  set(REPROC_WINSOCK_LIBRARY ws2_32)
+  # ws2_32 no longer needed — pipes use native Windows API instead of sockets.
 elseif(CMAKE_SYSTEM_NAME MATCHES Linux)
   set(REPROC_RT_LIBRARY rt) # clock_gettime
 endif()
@@ -14,7 +14,7 @@ endif()
 if(WIN32)
   set(PLATFORM windows)
   target_compile_definitions(reproc PRIVATE WIN32_LEAN_AND_MEAN)
-  target_link_libraries(reproc PRIVATE ${REPROC_WINSOCK_LIBRARY})
+  # ws2_32 removed — no longer using Winsock for pipes.
 else()
   set(PLATFORM posix)
   if(NOT APPLE)
